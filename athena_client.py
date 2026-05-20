@@ -160,9 +160,11 @@ def explorar_solicitudes(
     medio: str | None = None,
     decision: str | None = None,
     limite: int = 20,
+    offset: int = 0,
 ) -> pd.DataFrame:
     fecha_dia = validar_particion(fecha_dia)
-    limite = max(5, min(int(limite), 100))
+    limite = max(1, min(int(limite), 21))
+    offset = max(0, int(offset))
 
     filtros = [filtro_fecha(fecha_dia)]
 
@@ -195,6 +197,7 @@ def explorar_solicitudes(
     FROM {ATHENA_DATABASE}.{GOLD_TABLE}
     WHERE {where_sql}
     {order_sql}
+    OFFSET {offset}
     LIMIT {limite}
     """
 
