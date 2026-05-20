@@ -113,6 +113,21 @@ def ejecutar_athena(sql: str) -> pd.DataFrame:
     )
 
 
+PACIENTE_INFO_SQL = "CAST(paciente_info AS VARCHAR)"
+
+
+def campo_paciente_sql(campo: str) -> str:
+    return f"regexp_extract({PACIENTE_INFO_SQL}, '{campo}=([^,}}]+)', 1)"
+
+
+def medicacion_sql() -> str:
+    return f"regexp_extract({PACIENTE_INFO_SQL}, 'medicacion=\\[([^\\]]*)\\]', 1)"
+
+
+def decision_cobertura_sql() -> str:
+    return "CASE WHEN CAST(cobertura AS BOOLEAN) THEN 'CUBRE' ELSE 'NO_CUBRE' END"
+
+
 def buscar_solicitud_por_id(
     id_solicitud: str,
     fecha_dia: str | None = None,
@@ -129,17 +144,15 @@ def buscar_solicitud_por_id(
     SELECT
         id_solicitud,
         fecha_solicitud,
-        medio_emisor,
         valor_procedimiento,
-        entidad_emisora,
-        paciente_nombre,
-        paciente_dno,
-        paciente_seguro_social,
-        edad,
-        perfil_cobertura,
+        {campo_paciente_sql('nombre')} AS paciente_nombre,
+        {campo_paciente_sql('dno')} AS paciente_dno,
+        {campo_paciente_sql('seguro_social')} AS paciente_seguro_social,
+        CAST({campo_paciente_sql('edad')} AS INTEGER) AS edad,
+        {campo_paciente_sql('perfil_cobertura')} AS perfil_cobertura,
         servicio_solicitado,
-        medicacion,
-        decision_cobertura,
+        {medicacion_sql()} AS medicacion,
+        {decision_cobertura_sql()} AS decision_cobertura,
         porcentaje_cobertura,
         monto_cubierto,
         razon_decision,
@@ -156,8 +169,8 @@ def buscar_solicitud_por_id(
 
 def explorar_solicitudes(
     fecha_dia: str,
-    entidad: str | None = None,
-    medio: str | None = None,
+    perfil: str | None = None,
+    servicio: str | None = None,
     decision: str | None = None,
     limite: int = 20,
     offset: int = 0,
@@ -168,17 +181,17 @@ def explorar_solicitudes(
 
     filtros = [filtro_fecha(fecha_dia)]
 
-    if entidad and entidad != "Todas":
-        entidad_limpia = escapar_sql(entidad)
-        filtros.append(f"entidad_emisora = '{entidad_limpia}'")
+    if perfil and perfil != "Todos":
+        perfil_limpio = escapar_sql(perfil)
+        filtros.append(f"{campo_paciente_sql('perfil_cobertura')} = '{perfil_limpio}'")
 
-    if medio and medio != "Todos":
-        medio_limpio = escapar_sql(medio)
-        filtros.append(f"medio_emisor = '{medio_limpio}'")
+    if servicio and servicio != "Todos":
+        servicio_limpio = escapar_sql(servicio)
+        filtros.append(f"servicio_solicitado = '{servicio_limpio}'")
 
     if decision and decision != "Todas":
         decision_limpia = escapar_sql(decision)
-        filtros.append(f"decision_cobertura = '{decision_limpia}'")
+        filtros.append(f"{decision_cobertura_sql()} = '{decision_limpia}'")
 
     where_sql = " AND ".join(filtros)
     order_sql = "ORDER BY fecha_solicitud DESC" if EXPLORER_ORDER_BY_ENABLED else ""
@@ -187,11 +200,10 @@ def explorar_solicitudes(
     SELECT
         id_solicitud,
         fecha_solicitud,
-        medio_emisor,
         valor_procedimiento,
-        entidad_emisora,
+        {campo_paciente_sql('perfil_cobertura')} AS perfil_cobertura,
         servicio_solicitado,
-        decision_cobertura,
+        {decision_cobertura_sql()} AS decision_cobertura,
         porcentaje_cobertura,
         monto_cubierto
     FROM {ATHENA_DATABASE}.{GOLD_TABLE}
@@ -208,35 +220,34 @@ def obtener_opciones_filtros(fecha_dia: str) -> dict[str, list[str]]:
     fecha_dia = validar_particion(fecha_dia)
 
     sql = f"""
-    SELECT 'entidad_emisora' AS filtro, CAST(entidad_emisora AS VARCHAR) AS valor
+    SELECT 'perfil_cobertura' AS filtro, CAST({campo_paciente_sql('perfil_cobertura')} AS VARCHAR) AS valor
     FROM {ATHENA_DATABASE}.{GOLD_TABLE}
     WHERE {filtro_fecha(fecha_dia)}
-      AND entidad_emisora IS NOT NULL
-    GROUP BY CAST(entidad_emisora AS VARCHAR)
+      AND {campo_paciente_sql('perfil_cobertura')} IS NOT NULL
+    GROUP BY CAST({campo_paciente_sql('perfil_cobertura')} AS VARCHAR)
 
     UNION ALL
 
-    SELECT 'medio_emisor' AS filtro, CAST(medio_emisor AS VARCHAR) AS valor
+    SELECT 'servicio_solicitado' AS filtro, CAST(servicio_solicitado AS VARCHAR) AS valor
     FROM {ATHENA_DATABASE}.{GOLD_TABLE}
     WHERE {filtro_fecha(fecha_dia)}
-      AND medio_emisor IS NOT NULL
-    GROUP BY CAST(medio_emisor AS VARCHAR)
+      AND servicio_solicitado IS NOT NULL
+    GROUP BY CAST(servicio_solicitado AS VARCHAR)
 
     UNION ALL
 
-    SELECT 'decision_cobertura' AS filtro, CAST(decision_cobertura AS VARCHAR) AS valor
+    SELECT 'decision_cobertura' AS filtro, {decision_cobertura_sql()} AS valor
     FROM {ATHENA_DATABASE}.{GOLD_TABLE}
     WHERE {filtro_fecha(fecha_dia)}
-      AND decision_cobertura IS NOT NULL
-    GROUP BY CAST(decision_cobertura AS VARCHAR)
+    GROUP BY {decision_cobertura_sql()}
 
     ORDER BY filtro, valor
     """
 
     df = ejecutar_athena(sql)
     opciones = {
-        "entidad_emisora": [],
-        "medio_emisor": [],
+        "perfil_cobertura": [],
+        "servicio_solicitado": [],
         "decision_cobertura": [],
     }
 
@@ -253,20 +264,26 @@ def obtener_valores_filtro(fecha_dia: str, columna: str) -> list[str]:
     fecha_dia = validar_particion(fecha_dia)
 
     columnas_permitidas = {
-        "entidad_emisora",
-        "medio_emisor",
-        "decision_cobertura",
         "perfil_cobertura",
+        "servicio_solicitado",
+        "decision_cobertura",
     }
 
     if columna not in columnas_permitidas:
         raise ValueError("Columna de filtro no permitida.")
 
+    expresiones_columna = {
+        "perfil_cobertura": campo_paciente_sql("perfil_cobertura"),
+        "servicio_solicitado": "servicio_solicitado",
+        "decision_cobertura": decision_cobertura_sql(),
+    }
+    expresion = expresiones_columna[columna]
+
     sql = f"""
-    SELECT DISTINCT {columna}
+    SELECT DISTINCT {expresion} AS {columna}
     FROM {ATHENA_DATABASE}.{GOLD_TABLE}
     WHERE {filtro_fecha(fecha_dia)}
-      AND {columna} IS NOT NULL
+      AND {expresion} IS NOT NULL
     ORDER BY {columna}
     """
 

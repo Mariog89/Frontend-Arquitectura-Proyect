@@ -27,16 +27,16 @@ def cargar_opciones_filtros(fecha_str: str):
 @st.cache_data(ttl=CACHE_TTL_SECONDS)
 def explorar_solicitudes_cached(
     fecha_str: str,
-    entidad: str,
-    medio: str,
+    perfil: str,
+    servicio: str,
     decision: str,
     limite: int,
     offset: int,
 ):
     return explorar_solicitudes(
         fecha_dia=fecha_str,
-        entidad=entidad,
-        medio=medio,
+        perfil=perfil,
+        servicio=servicio,
         decision=decision,
         limite=limite,
         offset=offset,
@@ -45,8 +45,8 @@ def explorar_solicitudes_cached(
 
 def consultar_pagina_solicitudes(
     fecha_str: str,
-    entidad: str,
-    medio: str,
+    perfil: str,
+    servicio: str,
     decision: str,
     pagina: int,
 ) -> None:
@@ -54,8 +54,8 @@ def consultar_pagina_solicitudes(
     offset = pagina * PAGE_SIZE
     df = explorar_solicitudes_cached(
         fecha_str=fecha_str,
-        entidad=entidad,
-        medio=medio,
+        perfil=perfil,
+        servicio=servicio,
         decision=decision,
         limite=limite_consulta,
         offset=offset,
@@ -66,8 +66,8 @@ def consultar_pagina_solicitudes(
     st.session_state["explorador_pagina"] = pagina
     st.session_state["criterios_df_filtrado"] = {
         "fecha": fecha_str,
-        "entidad": entidad,
-        "medio": medio,
+        "perfil": perfil,
+        "servicio": servicio,
         "decision": decision,
         "pagina": pagina,
         "registros_por_pagina": PAGE_SIZE,
@@ -138,8 +138,6 @@ if st.button("Buscar solicitud"):
                 st.markdown("#### 🏥 Datos de la solicitud")
                 st.write(f"ID Solicitud: {row['id_solicitud']}")
                 st.write(f"Fecha: {row['fecha_solicitud']}")
-                st.write(f"Medio emisor: {row['medio_emisor']}")
-                st.write(f"Entidad emisora: {row['entidad_emisora']}")
                 st.write(f"Servicio solicitado: {row['servicio_solicitado']}")
                 st.write(f"Valor del procedimiento: ${valor_procedimiento:,.0f}")
 
@@ -167,18 +165,18 @@ fecha_filtro_str = st.selectbox(
 with st.spinner("Cargando filtros disponibles..."):
     opciones_filtros = cargar_opciones_filtros(fecha_filtro_str)
 
-entidades = ["Todas"] + opciones_filtros.get("entidad_emisora", [])
-medios = ["Todos"] + opciones_filtros.get("medio_emisor", [])
+perfiles = ["Todos"] + opciones_filtros.get("perfil_cobertura", [])
+servicios = ["Todos"] + opciones_filtros.get("servicio_solicitado", [])
 decisiones = ["Todas"] + opciones_filtros.get("decision_cobertura", [])
 
 with st.form("form_explorar_solicitudes"):
     col_f1, col_f2, col_f3 = st.columns(3)
 
     with col_f1:
-        entidad_sel = st.selectbox("Entidad emisora", entidades)
+        perfil_sel = st.selectbox("Perfil de cobertura", perfiles)
 
     with col_f2:
-        medio_sel = st.selectbox("Medio emisor", medios)
+        servicio_sel = st.selectbox("Servicio solicitado", servicios)
 
     with col_f3:
         decision_sel = st.selectbox("Decisión", decisiones)
@@ -189,8 +187,8 @@ if consultar:
     with st.spinner("Consultando solicitudes..."):
         consultar_pagina_solicitudes(
             fecha_str=fecha_filtro_str,
-            entidad=entidad_sel,
-            medio=medio_sel,
+            perfil=perfil_sel,
+            servicio=servicio_sel,
             decision=decision_sel,
             pagina=0,
         )
@@ -203,8 +201,8 @@ if "df_filtrado" in st.session_state:
     st.caption(
         "Última consulta: "
         f"fecha={criterios.get('fecha', '-')}, "
-        f"entidad={criterios.get('entidad', '-')}, "
-        f"medio={criterios.get('medio', '-')}, "
+        f"perfil={criterios.get('perfil', '-')}, "
+        f"servicio={criterios.get('servicio', '-')}, "
         f"decisión={criterios.get('decision', '-')}, "
         f"página={pagina_actual + 1}, "
         f"registros por página={PAGE_SIZE}"
@@ -227,8 +225,8 @@ if "df_filtrado" in st.session_state:
         with st.spinner("Consultando solicitudes..."):
             consultar_pagina_solicitudes(
                 fecha_str=criterios["fecha"],
-                entidad=criterios["entidad"],
-                medio=criterios["medio"],
+                perfil=criterios["perfil"],
+                servicio=criterios["servicio"],
                 decision=criterios["decision"],
                 pagina=nueva_pagina,
             )
