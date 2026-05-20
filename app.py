@@ -3,29 +3,57 @@ import streamlit as st
 from athena_client import (
     buscar_solicitud_por_id,
     explorar_solicitudes,
-    obtener_valores_filtro,
+    obtener_opciones_filtros,
+    obtener_particiones_validas,
 )
+
+CACHE_TTL_SECONDS = 3600
+
+
+@st.cache_data(ttl=CACHE_TTL_SECONDS)
+def buscar_solicitud_cached(id_solicitud: str, fechas_particion: tuple[str, ...]):
+    return buscar_solicitud_por_id(
+        id_solicitud,
+        fecha_dias=list(fechas_particion),
+    )
+
+
+@st.cache_data(ttl=CACHE_TTL_SECONDS)
+def cargar_opciones_filtros(fecha_str: str):
+    return obtener_opciones_filtros(fecha_str)
+
+
+@st.cache_data(ttl=CACHE_TTL_SECONDS)
+def explorar_solicitudes_cached(
+    fecha_str: str,
+    entidad: str,
+    medio: str,
+    decision: str,
+    limite: int,
+):
+    return explorar_solicitudes(
+        fecha_dia=fecha_str,
+        entidad=entidad,
+        medio=medio,
+        decision=decision,
+        limite=limite,
+    )
+
+
+particiones_validas = obtener_particiones_validas()
 
 st.title("Sistema de consulta de cobertura médica")
 
 st.markdown("### 🔎 Buscar solicitud por ID")
 
-col_id, col_fecha = st.columns(2)
-
-with col_id:
-    id_ingresado = st.text_input("ID de solicitud", placeholder="Ej: CHV-0447260")
-
-with col_fecha:
-    fecha_dia = st.date_input("Día de partición")
+id_ingresado = st.text_input("ID de solicitud", placeholder="Ej: CHV-0447260")
 
 if st.button("Buscar solicitud"):
     if not id_ingresado:
         st.warning("Ingresa un ID de solicitud.")
     else:
-        fecha_str = fecha_dia.strftime("%Y-%m-%d")
-
         with st.spinner("Consultando datos Gold en Athena..."):
-            fila = buscar_solicitud_por_id(id_ingresado, fecha_str)
+            fila = buscar_solicitud_cached(id_ingresado, tuple(particiones_validas))
 
         if fila.empty:
             st.error(f"❌ No se encontró ninguna solicitud con ID: {id_ingresado}")
@@ -96,46 +124,63 @@ if st.button("Buscar solicitud"):
 st.markdown("---")
 st.subheader("📊 Explorar solicitudes por filtro")
 
-fecha_filtro = st.date_input("Día a explorar", key="fecha_explorador")
-fecha_filtro_str = fecha_filtro.strftime("%Y-%m-%d")
+fecha_filtro_str = st.selectbox(
+    "Día a explorar",
+    particiones_validas,
+    key="fecha_explorador",
+)
 
+with st.spinner("Cargando filtros disponibles..."):
+    opciones_filtros = cargar_opciones_filtros(fecha_filtro_str)
 
-@st.cache_data(ttl=300)
-def cargar_entidades(fecha_str):
-    return ["Todas"] + obtener_valores_filtro(fecha_str, "entidad_emisora")
+entidades = ["Todas"] + opciones_filtros.get("entidad_emisora", [])
+medios = ["Todos"] + opciones_filtros.get("medio_emisor", [])
+decisiones = ["Todas"] + opciones_filtros.get("decision_cobertura", [])
 
+with st.form("form_explorar_solicitudes"):
+    col_f1, col_f2, col_f3, col_f4 = st.columns(4)
 
-@st.cache_data(ttl=300)
-def cargar_medios(fecha_str):
-    return ["Todos"] + obtener_valores_filtro(fecha_str, "medio_emisor")
+    with col_f1:
+        entidad_sel = st.selectbox("Entidad emisora", entidades)
 
+    with col_f2:
+        medio_sel = st.selectbox("Medio emisor", medios)
 
-@st.cache_data(ttl=300)
-def cargar_decisiones(fecha_str):
-    return ["Todas"] + obtener_valores_filtro(fecha_str, "decision_cobertura")
+    with col_f3:
+        decision_sel = st.selectbox("Decisión", decisiones)
 
+    with col_f4:
+        n_filas = st.slider("Registros", 5, 100, 20)
 
-col_f1, col_f2, col_f3, col_f4 = st.columns(4)
+    consultar = st.form_submit_button("Consultar solicitudes")
 
-with col_f1:
-    entidad_sel = st.selectbox("Entidad emisora", cargar_entidades(fecha_filtro_str))
+if consultar:
+    with st.spinner("Consultando solicitudes..."):
+        st.session_state["df_filtrado"] = explorar_solicitudes_cached(
+            fecha_str=fecha_filtro_str,
+            entidad=entidad_sel,
+            medio=medio_sel,
+            decision=decision_sel,
+            limite=n_filas,
+        )
+        st.session_state["criterios_df_filtrado"] = {
+            "fecha": fecha_filtro_str,
+            "entidad": entidad_sel,
+            "medio": medio_sel,
+            "decision": decision_sel,
+            "limite": n_filas,
+        }
 
-with col_f2:
-    medio_sel = st.selectbox("Medio emisor", cargar_medios(fecha_filtro_str))
-
-with col_f3:
-    decision_sel = st.selectbox("Decisión", cargar_decisiones(fecha_filtro_str))
-
-with col_f4:
-    n_filas = st.slider("Registros", 5, 100, 20)
-
-with st.spinner("Consultando solicitudes..."):
-    df_filtrado = explorar_solicitudes(
-        fecha_dia=fecha_filtro_str,
-        entidad=entidad_sel,
-        medio=medio_sel,
-        decision=decision_sel,
-        limite=n_filas,
+if "df_filtrado" in st.session_state:
+    criterios = st.session_state.get("criterios_df_filtrado", {})
+    st.caption(
+        "Última consulta: "
+        f"fecha={criterios.get('fecha', '-')}, "
+        f"entidad={criterios.get('entidad', '-')}, "
+        f"medio={criterios.get('medio', '-')}, "
+        f"decisión={criterios.get('decision', '-')}, "
+        f"registros={criterios.get('limite', '-')}"
     )
-
-st.dataframe(df_filtrado, use_container_width=True)
+    st.dataframe(st.session_state["df_filtrado"], use_container_width=True)
+else:
+    st.info("Configura los filtros y presiona Consultar solicitudes.")
