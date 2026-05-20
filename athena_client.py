@@ -1,5 +1,6 @@
 import os
 import re
+import zlib
 from functools import lru_cache
 
 import awswrangler as wr
@@ -18,6 +19,23 @@ EXPLORER_ORDER_BY_ENABLED = os.getenv("EXPLORER_ORDER_BY_ENABLED", "true").lower
     "true",
     "yes",
 }
+LOOKUP_BASE_PATH = os.getenv(
+    "LOOKUP_BASE_PATH", "s3://coil-arquitectura/gold/solicitudes_lookup_por_id/"
+)
+COBERTURA_PERFIL_PATH = os.getenv(
+    "COBERTURA_PERFIL_PATH", "s3://coil-arquitectura/gold/cobertura_por_perfil/"
+)
+COSTOS_ENTIDAD_PATH = os.getenv(
+    "COSTOS_ENTIDAD_PATH", "s3://coil-arquitectura/gold/costos_por_entidad/"
+)
+TOTAL_ORDENES_DIA_PATH = os.getenv(
+    "TOTAL_ORDENES_DIA_PATH", "s3://coil-arquitectura/gold/total_ordenes_por_dia/"
+)
+TRAZABILIDAD_ENTIDAD_PATH = os.getenv(
+    "TRAZABILIDAD_ENTIDAD_PATH",
+    "s3://coil-arquitectura/gold/trazabilidad/trazabilidad_por_entidad/",
+)
+TOTAL_BUCKETS = int(os.getenv("LOOKUP_TOTAL_BUCKETS", "100"))
 
 # Cambia esto a "date" si Athena muestra fecha_dia como date.
 FECHA_DIA_TYPE = os.getenv("FECHA_DIA_TYPE", "date")
@@ -47,6 +65,12 @@ def validar_id_solicitud(id_solicitud: str) -> str:
         raise ValueError("ID de solicitud inválido.")
 
     return id_solicitud
+
+
+def calcular_id_bucket(id_solicitud: str) -> int:
+    id_solicitud = validar_id_solicitud(id_solicitud)
+    checksum = zlib.crc32(id_solicitud.encode("utf-8")) & 0xFFFFFFFF
+    return checksum % TOTAL_BUCKETS
 
 
 def validar_formato_fecha(fecha_dia: str) -> str:
@@ -113,19 +137,48 @@ def ejecutar_athena(sql: str) -> pd.DataFrame:
     )
 
 
-PACIENTE_INFO_SQL = "CAST(paciente_info AS VARCHAR)"
+def leer_parquet_s3(path: str, dataset: bool = False) -> pd.DataFrame:
+    try:
+        return wr.s3.read_parquet(path=path, dataset=dataset)
+    except Exception as error:
+        if error.__class__.__name__ in {"NoFilesFound", "NoFilesFoundError"}:
+            return pd.DataFrame()
+        raise
 
 
-def campo_paciente_sql(campo: str) -> str:
-    return f"regexp_extract({PACIENTE_INFO_SQL}, '{campo}=([^,}}]+)', 1)"
+def buscar_solicitud_por_id_s3(id_solicitud: str) -> pd.DataFrame:
+    id_solicitud = validar_id_solicitud(id_solicitud)
+    id_bucket = calcular_id_bucket(id_solicitud)
+    path = f"{LOOKUP_BASE_PATH.rstrip('/')}/id_bucket={id_bucket}/"
+    df = leer_parquet_s3(path=path, dataset=True)
+
+    if df.empty or "id_solicitud" not in df.columns:
+        return pd.DataFrame()
+
+    resultado = df[df["id_solicitud"].astype(str) == id_solicitud].copy()
+    return resultado.head(1)
 
 
-def medicacion_sql() -> str:
-    return f"regexp_extract({PACIENTE_INFO_SQL}, 'medicacion=\\[([^\\]]*)\\]', 1)"
+def leer_cobertura_por_perfil_s3() -> pd.DataFrame:
+    return leer_parquet_s3(COBERTURA_PERFIL_PATH)
 
 
-def decision_cobertura_sql() -> str:
-    return "CASE WHEN CAST(cobertura AS BOOLEAN) THEN 'CUBRE' ELSE 'NO_CUBRE' END"
+def leer_total_ordenes_por_dia_s3() -> pd.DataFrame:
+    return leer_parquet_s3(TOTAL_ORDENES_DIA_PATH)
+
+
+def leer_trazabilidad_por_entidad_s3() -> pd.DataFrame:
+    return leer_parquet_s3(TRAZABILIDAD_ENTIDAD_PATH)
+
+
+def leer_costos_por_entidad_s3(fecha_dia: str | None = None) -> pd.DataFrame:
+    df = leer_parquet_s3(COSTOS_ENTIDAD_PATH, dataset=True)
+
+    if fecha_dia and not df.empty and "fecha_dia" in df.columns:
+        fechas = pd.to_datetime(df["fecha_dia"], errors="coerce").dt.strftime("%Y-%m-%d")
+        df = df[fechas == fecha_dia].copy()
+
+    return df
 
 
 def buscar_solicitud_por_id(
@@ -144,15 +197,17 @@ def buscar_solicitud_por_id(
     SELECT
         id_solicitud,
         fecha_solicitud,
+        medio_emisor,
         valor_procedimiento,
-        {campo_paciente_sql('nombre')} AS paciente_nombre,
-        {campo_paciente_sql('dno')} AS paciente_dno,
-        {campo_paciente_sql('seguro_social')} AS paciente_seguro_social,
-        CAST({campo_paciente_sql('edad')} AS INTEGER) AS edad,
-        {campo_paciente_sql('perfil_cobertura')} AS perfil_cobertura,
+        entidad_emisora,
+        paciente_nombre,
+        paciente_dno,
+        paciente_seguro_social,
+        edad,
+        perfil_cobertura,
         servicio_solicitado,
-        {medicacion_sql()} AS medicacion,
-        {decision_cobertura_sql()} AS decision_cobertura,
+        medicacion,
+        decision_cobertura,
         porcentaje_cobertura,
         monto_cubierto,
         razon_decision,
@@ -183,7 +238,7 @@ def explorar_solicitudes(
 
     if perfil and perfil != "Todos":
         perfil_limpio = escapar_sql(perfil)
-        filtros.append(f"{campo_paciente_sql('perfil_cobertura')} = '{perfil_limpio}'")
+        filtros.append(f"perfil_cobertura = '{perfil_limpio}'")
 
     if servicio and servicio != "Todos":
         servicio_limpio = escapar_sql(servicio)
@@ -191,7 +246,7 @@ def explorar_solicitudes(
 
     if decision and decision != "Todas":
         decision_limpia = escapar_sql(decision)
-        filtros.append(f"{decision_cobertura_sql()} = '{decision_limpia}'")
+        filtros.append(f"decision_cobertura = '{decision_limpia}'")
 
     where_sql = " AND ".join(filtros)
     order_sql = "ORDER BY fecha_solicitud DESC" if EXPLORER_ORDER_BY_ENABLED else ""
@@ -200,10 +255,12 @@ def explorar_solicitudes(
     SELECT
         id_solicitud,
         fecha_solicitud,
+        medio_emisor,
         valor_procedimiento,
-        {campo_paciente_sql('perfil_cobertura')} AS perfil_cobertura,
+        entidad_emisora,
+        perfil_cobertura,
         servicio_solicitado,
-        {decision_cobertura_sql()} AS decision_cobertura,
+        decision_cobertura,
         porcentaje_cobertura,
         monto_cubierto
     FROM {ATHENA_DATABASE}.{GOLD_TABLE}
@@ -220,11 +277,11 @@ def obtener_opciones_filtros(fecha_dia: str) -> dict[str, list[str]]:
     fecha_dia = validar_particion(fecha_dia)
 
     sql = f"""
-    SELECT 'perfil_cobertura' AS filtro, CAST({campo_paciente_sql('perfil_cobertura')} AS VARCHAR) AS valor
+    SELECT 'perfil_cobertura' AS filtro, CAST(perfil_cobertura AS VARCHAR) AS valor
     FROM {ATHENA_DATABASE}.{GOLD_TABLE}
     WHERE {filtro_fecha(fecha_dia)}
-      AND {campo_paciente_sql('perfil_cobertura')} IS NOT NULL
-    GROUP BY CAST({campo_paciente_sql('perfil_cobertura')} AS VARCHAR)
+      AND perfil_cobertura IS NOT NULL
+    GROUP BY CAST(perfil_cobertura AS VARCHAR)
 
     UNION ALL
 
@@ -236,10 +293,11 @@ def obtener_opciones_filtros(fecha_dia: str) -> dict[str, list[str]]:
 
     UNION ALL
 
-    SELECT 'decision_cobertura' AS filtro, {decision_cobertura_sql()} AS valor
+    SELECT 'decision_cobertura' AS filtro, CAST(decision_cobertura AS VARCHAR) AS valor
     FROM {ATHENA_DATABASE}.{GOLD_TABLE}
     WHERE {filtro_fecha(fecha_dia)}
-    GROUP BY {decision_cobertura_sql()}
+      AND decision_cobertura IS NOT NULL
+    GROUP BY CAST(decision_cobertura AS VARCHAR)
 
     ORDER BY filtro, valor
     """
@@ -272,18 +330,11 @@ def obtener_valores_filtro(fecha_dia: str, columna: str) -> list[str]:
     if columna not in columnas_permitidas:
         raise ValueError("Columna de filtro no permitida.")
 
-    expresiones_columna = {
-        "perfil_cobertura": campo_paciente_sql("perfil_cobertura"),
-        "servicio_solicitado": "servicio_solicitado",
-        "decision_cobertura": decision_cobertura_sql(),
-    }
-    expresion = expresiones_columna[columna]
-
     sql = f"""
-    SELECT DISTINCT {expresion} AS {columna}
+    SELECT DISTINCT {columna}
     FROM {ATHENA_DATABASE}.{GOLD_TABLE}
     WHERE {filtro_fecha(fecha_dia)}
-      AND {expresion} IS NOT NULL
+      AND {columna} IS NOT NULL
     ORDER BY {columna}
     """
 
